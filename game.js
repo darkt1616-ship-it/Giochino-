@@ -52,10 +52,14 @@ var CONFIG = {
 
   moves: {
     punch: { startup: 100, active: 50,  recovery: 130, damage: 6,  stamina: 8,
-             knockback: 90,  hitstun: 180, range: 96,  hitboxH: 40, chip: 1 },
+             knockback: 90,  hitstun: 180, range: 96,  hitboxH: 46, hitY: -128,
+             chip: 1, lunge: 70 },
     kick:  { startup: 240, active: 80,  recovery: 380, damage: 16, stamina: 20,
-             knockback: 320, hitstun: 340, range: 128, hitboxH: 55, chip: 3 }
+             knockback: 320, hitstun: 340, range: 128, hitboxH: 70, hitY: -110,
+             chip: 3, lunge: 45 }
   },
+
+  hurtbox: { halfW: 26, top: -195 },  // rettangolo dal suolo alla testa
 
   block: {
     damageCut: 0.8,        // taglia l'80% del danno
@@ -321,6 +325,8 @@ function makeFighter(index, x, facing) {
     hitstunMs: 0,
     invulnMs: 0,
     dodgeDir: 0,
+    staminaFlashT: 0,
+    holdingBlock: false,
 
     downs: 0,             // atterramenti subiti nel match
     damageDealt: 0,       // per i punti
@@ -439,6 +445,7 @@ function updateFighter(f, dt, t) {
 
   f.stateT += ms;
   if (f.invulnMs > 0) f.invulnMs -= ms;
+  if (f.staminaFlashT > 0) f.staminaFlashT -= ms;
 
   // faccia sempre l'avversario (tranne quando è per terra)
   if (f.state !== 'downed' && f.state !== 'ko' && f.state !== 'dodge') {
@@ -466,7 +473,7 @@ function updateFighter(f, dt, t) {
         setState(f, 'idle', true);
       }
       // rigenera stamina
-      f.stamina = clamp(f.stamina + F.staminaRegen * dt, 0, F.stamina0 || 100);
+      f.stamina = clamp(f.stamina + F.staminaRegen * dt, 0, F.stamina);
       break;
 
     case 'dodge':
@@ -475,8 +482,17 @@ function updateFighter(f, dt, t) {
       break;
 
     case 'attack':
-      f.vx = expDamp(f.vx, 0, 8, dt);
       var m = f.move;
+      var ph = attackPhase(f);
+      if (ph.name === 'startup') {
+        // piccolo affondo in avanti: la mossa deve sembrare "buttata"
+        f.vx = expDamp(f.vx, f.facing * m.lunge, 12, dt);
+      } else {
+        f.vx = expDamp(f.vx, 0, 8, dt);
+      }
+      if (ph.name === 'active' && !f.moveHit) {
+        checkHit(f, opp);
+      }
       if (f.stateT >= m.startup + m.active + m.recovery) {
         f.move = null;
         setState(f, 'idle');
@@ -830,7 +846,8 @@ function drawHealthBar(x, y, w, f, flip) {
   ctx.fillStyle = 'rgba(0,0,0,0.5)';
   roundRect(x, sy, w, 7, 3); ctx.fill();
   var sfrac = clamp(f.stamina / CONFIG.fighter.stamina, 0, 1);
-  ctx.fillStyle = '#e8c33a';
+  ctx.fillStyle = (f.staminaFlashT > 0 && Math.floor(f.staminaFlashT / 60) % 2 === 0)
+    ? '#ff5050' : '#e8c33a';
   var sw = w * sfrac;
   if (sw > 0) { roundRect(flip ? x + w - sw : x, sy, sw, 7, 3); ctx.fill(); }
   // pallini atterramenti
@@ -878,28 +895,145 @@ function startMatch(diff) {
   document.getElementById('menu-overlay').classList.add('hidden');
 }
 
-/* ============================ INPUT → AZIONI (M2 completa) ============================ */
+/* ============================ INPUT → AZIONI ============================ */
 function handlePlayerInput(f) {
   if (!f.isPlayer) return;
-  // per ora solo la schivata è "consumata" qui; pugno/calcio arrivano in M2
   if (Input.dodgePressed) {
     Input.dodgePressed = false;
     tryDodge(f);
   }
-  Input.punchPressed = false;
-  Input.kickPressed = false;
-  f.holdingBlock = false;
+  if (Input.punchPressed) { Input.punchPressed = false; tryAttack(f, 'punch'); }
+  if (Input.kickPressed)  { Input.kickPressed = false;  tryAttack(f, 'kick'); }
+  applyBlockInput(f, Input.block);
+}
+
+function applyBlockInput(f, holding) {
+  f.holdingBlock = holding;
+  if (holding && (f.state === 'idle' || f.state === 'walk') && f.stamina > 0) {
+    f.state = 'block';
+    f.stateT = 0;
+  }
 }
 
 function tryDodge(f) {
   if (f.state !== 'idle' && f.state !== 'walk') return;
-  if (f.stamina < CONFIG.dodge.staminaCost) return;
+  if (f.stamina < CONFIG.dodge.staminaCost) { staminaFail(f); return; }
   f.stamina -= CONFIG.dodge.staminaCost;
   f.dodgeDir = -f.facing;
   f.invulnMs = CONFIG.dodge.invulnMs;
   f.state = 'dodge';
   f.stateT = 0;
+  onWhoosh(f);
 }
+
+/* ============================ COMBATTIMENTO ============================ */
+function tryAttack(f, kind) {
+  if (f.state !== 'idle' && f.state !== 'walk') return;
+  var m = CONFIG.moves[kind];
+  if (f.stamina < m.stamina) { staminaFail(f); return; }
+  f.stamina -= m.stamina;
+  f.move = { kind: kind, startup: m.startup, active: m.active, recovery: m.recovery,
+             damage: m.damage, knockback: m.knockback, hitstun: m.hitstun,
+             range: m.range, hitboxH: m.hitboxH, hitY: m.hitY, chip: m.chip,
+             lunge: m.lunge };
+  f.moveHit = false;
+  f.state = 'attack';
+  f.stateT = 0;
+  if (kind === 'kick') onWhoosh(f);
+}
+
+function staminaFail(f) {
+  f.staminaFlashT = 300; // la barra lampeggia: sei fiaccato
+}
+
+// hitbox dell'attacco vs hurtbox dell'avversario (rettangoli, un solo hit)
+function checkHit(f, opp) {
+  var m = f.move;
+  var s = f.facing;
+  // hitbox: davanti all'attaccante
+  var hx1 = f.x + s * 24, hx2 = f.x + s * m.range;
+  if (hx1 > hx2) { var tmp = hx1; hx1 = hx2; hx2 = tmp; }
+  var hy1 = m.hitY - m.hitboxH / 2, hy2 = m.hitY + m.hitboxH / 2;
+  // hurtbox avversario
+  var HB = CONFIG.hurtbox;
+  var ox1 = opp.x - HB.halfW, ox2 = opp.x + HB.halfW;
+  var oy1 = HB.top, oy2 = 0;
+  if (opp.state === 'downed' || opp.state === 'ko') return;      // niente calci a terra
+  if (opp.invulnMs > 0) return;                                   // schivata riuscita
+  if (hx2 < ox1 || hx1 > ox2 || hy2 < oy1 || hy1 > oy2) return;   // niente overlap
+
+  f.moveHit = true;
+  resolveHit(f, opp, m);
+}
+
+function resolveHit(f, opp, m) {
+  var blocked = opp.state === 'block';
+  var dir = opp.x >= f.x ? 1 : -1;
+
+  if (blocked) {
+    // parata: 80% del danno tagliato, ma chip damage e stamina persa
+    var chip = Math.min(m.chip, Math.max(0, opp.hp - 1)); // il chip non uccide
+    opp.hp -= chip;
+    opp.stamina -= CONFIG.block.staminaDrainHit;
+    opp.vx += dir * m.knockback * 0.45;
+    f.damageDealt += chip;
+    if (opp.stamina <= 0) {
+      opp.stamina = 0;
+      guardBreak(opp);
+      onGuardBreak(opp);
+    } else {
+      onHit(f, opp, m, true);
+    }
+    return;
+  }
+
+  opp.hp -= m.damage;
+  f.damageDealt += m.damage;
+  opp.vx += dir * m.knockback;
+  onHit(f, opp, m, false);
+
+  if (opp.hp <= 0) {
+    opp.hp = 0;
+    doKO(opp, dir, m);
+    return;
+  }
+
+  // calcio pulito con vita bassa → al tappeto (gestione completa in M4)
+  if (m.kind === 'kick' && opp.hp < CONFIG.knockdown.hpThreshold) {
+    doKnockdown(opp, dir);
+    return;
+  }
+
+  opp.state = 'hitstun';
+  opp.stateT = 0;
+  opp.hitstunMs = m.hitstun;
+  opp.holdingBlock = false;
+}
+
+function doKnockdown(opp, dir) {
+  opp.state = 'downed';
+  opp.stateT = 0;
+  opp.dodgeDir = dir;   // riusato come "verso della caduta"
+  opp.downs++;
+  opp.vx += dir * 180;
+  onKnockdown(opp);
+}
+
+function doKO(opp, dir, m) {
+  opp.state = 'ko';
+  opp.stateT = 0;
+  opp.ko = true;
+  opp.dodgeDir = dir;
+  opp.vx += dir * 240;
+  onKO(opp);
+}
+
+/* ---- ganci per juice/audio (riempiti in M5) e match (M4) ---- */
+function onHit(f, opp, m, blocked) {}
+function onGuardBreak(opp) {}
+function onKnockdown(opp) {}
+function onKO(opp) {}
+function onWhoosh(f) {}
 
 /* ============================ GAME LOOP ============================ */
 var lastT = 0;
