@@ -483,7 +483,12 @@ function loadFace(src, placeholder) {
   var img = new Image();
   img.onload = function () { face.img = img; };
   img.onerror = function () { /* resta il placeholder, nessun crash */ };
-  img.src = src;
+  // la build single-file (build.py) inietta le immagini come data URI
+  if (window.EMBEDDED_FACES && window.EMBEDDED_FACES[src]) {
+    img.src = window.EMBEDDED_FACES[src];
+  } else {
+    img.src = src;
+  }
   return face;
 }
 
@@ -919,11 +924,15 @@ function applyCameraTransform() {
 }
 
 /* ============================ SCENA ============================ */
+var _bgGrad = null, _bgGradH = 0;
 function drawBackground(t) {
-  var g = ctx.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0, CONFIG.colors.bgTop);
-  g.addColorStop(1, CONFIG.colors.bgBottom);
-  ctx.fillStyle = g;
+  if (!_bgGrad || _bgGradH !== H) {
+    _bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+    _bgGrad.addColorStop(0, CONFIG.colors.bgTop);
+    _bgGrad.addColorStop(1, CONFIG.colors.bgBottom);
+    _bgGradH = H;
+  }
+  ctx.fillStyle = _bgGrad;
   ctx.fillRect(0, 0, W, H);
 }
 
@@ -953,16 +962,19 @@ function drawCrowd(t) {
   }
 }
 
+var _spotGrad = null;
 function drawSpotlights(t) {
+  if (!_spotGrad) {
+    _spotGrad = ctx.createLinearGradient(0, -520, 0, 40);
+    _spotGrad.addColorStop(0, 'rgba(255, 244, 214, 0.10)');
+    _spotGrad.addColorStop(1, 'rgba(255, 244, 214, 0.0)');
+  }
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
   for (var i = 0; i < 2; i++) {
     var sx = i === 0 ? -220 : 220;
     var sway = Math.sin(t * 0.0006 + i * 3) * 40;
-    var g = ctx.createLinearGradient(0, -520, 0, 40);
-    g.addColorStop(0, 'rgba(255, 244, 214, 0.10)');
-    g.addColorStop(1, 'rgba(255, 244, 214, 0.0)');
-    ctx.fillStyle = g;
+    ctx.fillStyle = _spotGrad;
     ctx.beginPath();
     ctx.moveTo(sx - 30, -520);
     ctx.lineTo(sx + 30, -520);
@@ -1614,7 +1626,7 @@ function doKnockdown(opp, dir) {
   opp.dodgeDir = dir;   // riusato come "verso della caduta"
   opp.downs++;
   opp.vx = 0;
-  bodyImpulse(opp, dir * 850, -650);
+  bodyImpulse(opp, dir * 680, -420);
   opp.headSpinV = dir * rand(3, 6);
   if (opp.downs >= CONFIG.knockdown.maxDowns) {
     endByKO(fighterOpponent(opp), opp, 'TKO');
@@ -1629,7 +1641,7 @@ function doKO(opp, dir, m) {
   opp.ko = true;
   opp.dodgeDir = dir;
   opp.vx = 0;
-  bodyImpulse(opp, dir * 1200, -900);
+  bodyImpulse(opp, dir * 900, -480);
   opp.headSpinV = dir * rand(5, 10);
   onKO(opp);
 }
