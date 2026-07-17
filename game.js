@@ -85,7 +85,9 @@ var CONFIG = {
   rounds: {
     count: 3,
     durationS: 60,
-    restMs: 3200
+    restMs: 3200,
+    healBetween: 25,      // vita recuperata tra i round
+    introMs: 1600         // "ROUND N" prima del via
   },
 
   cpu: {
@@ -456,10 +458,12 @@ function updateFighter(f, dt, t) {
   }
 
   var wantDir = 0;
-  if (f.isPlayer) {
-    wantDir = (Input.right ? 1 : 0) - (Input.left ? 1 : 0);
-  } else if (f.cpuDir) {
-    wantDir = f.cpuDir;
+  if (Match.phase === 'fight') {
+    if (f.isPlayer) {
+      wantDir = (Input.right ? 1 : 0) - (Input.left ? 1 : 0);
+    } else if (f.cpuDir) {
+      wantDir = f.cpuDir;
+    }
   }
 
   switch (f.state) {
@@ -957,6 +961,55 @@ function drawHUD() {
   ctx.font = '700 11px sans-serif';
   ctx.fillStyle = 'rgba(255,255,255,0.7)';
   ctx.fillText('ROUND ' + Match.round, W / 2, topY + 50);
+
+  drawAnnounce();
+  drawGetupPrompt();
+}
+
+function drawAnnounce() {
+  var t = now();
+  if (t > Announce.until || !Announce.text) return;
+  var age = t - Announce.born;
+  var pop = Math.min(1, age / 160);
+  var scale = 0.6 + 0.4 * (1 - Math.pow(1 - pop, 3));
+  var fade = clamp((Announce.until - t) / 250, 0, 1);
+  ctx.save();
+  ctx.translate(W / 2, H * 0.34);
+  ctx.scale(scale, scale);
+  ctx.globalAlpha = fade;
+  ctx.font = 'italic 900 ' + Math.min(64, W * 0.08) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineWidth = 8;
+  ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+  ctx.strokeText(Announce.text, 0, 0);
+  ctx.fillStyle = '#ffd24a';
+  ctx.fillText(Announce.text, 0, 0);
+  ctx.restore();
+}
+
+function drawGetupPrompt() {
+  if (!f1 || f1.state !== 'downed' || Match.phase !== 'fight') return;
+  var K = CONFIG.knockdown;
+  var frac = 1 - clamp(f1.stateT / K.getupMs, 0, 1);
+  var y = H * 0.52;
+  var blink = Math.floor(now() / 220) % 2 === 0;
+  if (blink) {
+    ctx.font = '900 ' + Math.min(30, W * 0.045) + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+    ctx.strokeText('TAPPA PER RIALZARTI!', W / 2, y);
+    ctx.fillStyle = '#fff';
+    ctx.fillText('TAPPA PER RIALZARTI!', W / 2, y);
+  }
+  // barra del tempo rimasto
+  var bw = Math.min(W * 0.3, 260);
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  roundRect(W / 2 - bw / 2, y + 26, bw, 10, 5); ctx.fill();
+  ctx.fillStyle = frac > 0.35 ? '#ffd24a' : '#d03030';
+  if (frac > 0) { roundRect(W / 2 - bw / 2, y + 26, bw * frac, 10, 5); ctx.fill(); }
 }
 
 function drawHealthBar(x, y, w, f, flip) {
@@ -1010,25 +1063,237 @@ function formatTimer() {
   return m + ':' + (sec < 10 ? '0' : '') + sec;
 }
 
-/* ============================ MATCH (scheletro, M4 lo completa) ============================ */
+/* ============================ MATCH ============================ */
 var Match = {
   round: 1,
   timeLeft: CONFIG.rounds.durationS,
   running: false,
-  difficulty: 1
+  difficulty: 1,
+  phase: 'intro',       // intro | fight | rest | ko | over
+  phaseT: 0,
+  winner: null,
+  method: ''
 };
+
+var Announce = { text: '', until: 0, born: 0 };
+function announce(text, ms) {
+  Announce.text = text;
+  Announce.born = now();
+  Announce.until = now() + ms;
+}
 
 function startMatch(diff) {
   Match.difficulty = diff;
-  Match.round = 1;
-  Match.timeLeft = CONFIG.rounds.durationS;
   Match.running = true;
+  Match.winner = null;
+  Match.method = '';
   f1 = makeFighter(0, -140, 1);
   f2 = makeFighter(1, 140, -1);
   f1.isPlayer = true;
+  f2.cpu = { thinkT: 0, blockT: 0, reacted: false, pendingBlock: -1, pendingDodge: -1, getupT: -1 };
   f1.body = makeBody(f1, 0);
   f2.body = makeBody(f2, 0);
+  Match.round = 0;
+  startRound(1);
   document.getElementById('menu-overlay').classList.add('hidden');
+}
+
+function startRound(n) {
+  var R = CONFIG.rounds;
+  Match.round = n;
+  Match.timeLeft = R.durationS;
+  Match.phase = 'intro';
+  Match.phaseT = 0;
+  var fs = [f1, f2];
+  for (var i = 0; i < 2; i++) {
+    var f = fs[i];
+    f.x = i === 0 ? -140 : 140;
+    f.facing = i === 0 ? 1 : -1;
+    f.vx = 0;
+    f.state = 'idle';
+    f.stateT = 0;
+    f.move = null;
+    f.stamina = CONFIG.fighter.stamina;
+    if (n > 1) f.hp = Math.min(CONFIG.fighter.hp, f.hp + R.healBetween);
+    f.headSpin = 0; f.headSpinV = 0;
+    f.body = makeBody(f, 0);
+  }
+  if (f2.cpu) { f2.cpu.blockT = 0; f2.cpu.pendingBlock = -1; f2.cpu.pendingDodge = -1; f2.cpu.getupT = -1; }
+  announce('ROUND ' + n, R.introMs - 200);
+}
+
+function updateMatch(dt) {
+  var R = CONFIG.rounds;
+  Match.phaseT += dt * 1000;
+  switch (Match.phase) {
+    case 'intro':
+      if (Match.phaseT >= R.introMs) {
+        Match.phase = 'fight';
+        Match.phaseT = 0;
+        announce('FIGHT!', 700);
+        onBell();
+      }
+      break;
+    case 'fight':
+      Match.timeLeft -= dt;
+      handleDowned(f1);
+      handleDowned(f2);
+      if (Match.phase !== 'fight') break; // un TKO può essere scattato qui sopra
+      if (Match.timeLeft <= 0) {
+        Match.timeLeft = 0;
+        onBell();
+        if (Match.round >= R.count) {
+          decision();
+        } else {
+          Match.phase = 'rest';
+          Match.phaseT = 0;
+          announce('FINE ROUND', 1600);
+        }
+      }
+      break;
+    case 'rest':
+      if (Match.phaseT >= R.restMs) startRound(Match.round + 1);
+      break;
+    case 'ko':
+      if (Match.phaseT >= 2800) showWinner();
+      break;
+  }
+}
+
+function handleDowned(f) {
+  if (f.state !== 'downed') return;
+  var K = CONFIG.knockdown;
+  if (f.stateT >= K.getupMs) {
+    // non si è rialzato in tempo: TKO
+    endByKO(fighterOpponent(f), f, 'TKO');
+    return;
+  }
+  if (f.isPlayer) {
+    if (Input.tapped && f.stateT > 450) getUp(f);
+  } else {
+    var c = f.cpu;
+    if (c.getupT < 0) c.getupT = rand(800, 2200);
+    if (f.stateT >= c.getupT) { c.getupT = -1; getUp(f); }
+  }
+}
+
+function getUp(f) {
+  f.state = 'idle';
+  f.stateT = 0;
+  f.invulnMs = 700;   // un attimo di respiro mentre si rialza
+  f.vx = 0;
+}
+
+function decision() {
+  var winner = null;
+  if (f1.damageDealt > f2.damageDealt) winner = f1;
+  else if (f2.damageDealt > f1.damageDealt) winner = f2;
+  Match.winner = winner;
+  Match.method = winner ? 'AI PUNTI' : 'PAREGGIO';
+  Match.phase = 'ko';
+  Match.phaseT = 800; // niente ragdoll da guardare, accorcia l'attesa
+  announce(winner ? 'DECISIONE!' : 'PAREGGIO!', 1800);
+}
+
+function endByKO(winner, loser, method) {
+  Match.winner = winner;
+  Match.method = method;
+  Match.phase = 'ko';
+  Match.phaseT = 0;
+  if (loser.state !== 'ko') {
+    loser.state = 'ko';
+    loser.stateT = 0;
+    loser.ko = true;
+    bodyImpulse(loser, -loser.facing * 500, -350);
+  }
+  announce(method + '!', 2000);
+  onKOJuice(loser);
+}
+
+function showWinner() {
+  Match.phase = 'over';
+  Match.running = true; // continua a disegnare la scena sotto l'overlay
+  var ov = document.getElementById('menu-overlay');
+  var h1 = ov.querySelector('h1');
+  var sub = document.getElementById('menu-sub');
+  if (Match.winner) {
+    h1.textContent = 'VINCE ' + Match.winner.name + '!';
+    sub.textContent = Match.method + (Match.method === 'AI PUNTI' ? '' : ' al round ' + Match.round) +
+      ' — rivincita?';
+  } else {
+    h1.textContent = 'PAREGGIO';
+    sub.textContent = 'Nessuno le ha prese abbastanza. Rivincita?';
+  }
+  ov.classList.remove('hidden');
+}
+
+/* ============================ CPU ============================ */
+function updateCPU(f, dt) {
+  if (!f.cpu || f.state === 'downed' || f.state === 'ko') { f.cpuDir = 0; return; }
+  var c = f.cpu;
+  var opp = fighterOpponent(f);
+  var L = CONFIG.cpu.levels[Match.difficulty];
+  var ms = dt * 1000;
+  var d = Math.abs(opp.x - f.x);
+  var toward = opp.x >= f.x ? 1 : -1;
+
+  // --- percezione con ritardo: reagisce agli attacchi, ma non è onnisciente ---
+  if (opp.state === 'attack' && !c.reacted) {
+    c.reacted = true;
+    if (Math.random() > L.mistakes) {
+      var r = Math.random();
+      var delay = L.reactionMs * rand(0.85, 1.35);
+      if (r < L.blockChance) c.pendingBlock = delay;
+      else if (r < L.blockChance + L.dodgeChance) c.pendingDodge = delay;
+      // altrimenti: l'ha visto ma non fa niente (capita anche ai migliori)
+    }
+  }
+  if (opp.state !== 'attack') c.reacted = false;
+
+  if (c.pendingBlock >= 0) {
+    c.pendingBlock -= ms;
+    if (c.pendingBlock < 0) c.blockT = rand(300, 650);
+  }
+  if (c.pendingDodge >= 0) {
+    c.pendingDodge -= ms;
+    if (c.pendingDodge < 0) tryDodge(f);
+  }
+  if (c.blockT > 0) c.blockT -= ms;
+
+  // --- pianificazione: ogni thinkMs riconsidera cosa fare ---
+  c.thinkT -= ms;
+  if (c.thinkT <= 0) {
+    c.thinkT = CONFIG.cpu.thinkMs * rand(0.7, 1.6);
+    c.dir = 0;
+    c.wantAttack = null;
+
+    if (opp.state === 'downed' || opp.state === 'ko') {
+      c.dir = d < 180 ? -toward : 0;          // si scosta, fa il magnanimo
+    } else if (f.stamina < 22) {
+      c.dir = -toward;                         // fiaccato: rifiata
+    } else if (f.hp < CONFIG.cpu.retreatHp && Math.random() < 0.5) {
+      c.dir = -toward;                         // messo male: scappa un po'
+      if (Math.random() < 0.4) c.blockT = rand(250, 500);
+    } else if (d > CONFIG.cpu.idealRange + 45) {
+      c.dir = toward;
+    } else if (d < CONFIG.cpu.idealRange - 35) {
+      c.dir = -toward;
+    } else if (Math.random() < L.aggression) {
+      // in range: prova a menare
+      var goKick = (opp.hp < CONFIG.knockdown.hpThreshold && Math.random() < 0.65) ||
+                   Math.random() < 0.3;
+      c.wantAttack = goKick ? 'kick' : 'punch';
+    }
+  }
+
+  // --- esecuzione ---
+  f.cpuDir = c.dir || 0;
+  applyBlockInput(f, c.blockT > 0);
+  if (c.wantAttack && (f.state === 'idle' || f.state === 'walk')) {
+    var kind = c.wantAttack;
+    c.wantAttack = null;
+    if (d < CONFIG.moves[kind].range + 40) tryAttack(f, kind);
+  }
 }
 
 /* ============================ INPUT → AZIONI ============================ */
@@ -1156,6 +1421,10 @@ function doKnockdown(opp, dir) {
   opp.vx = 0;
   bodyImpulse(opp, dir * 850, -650);
   opp.headSpinV = dir * rand(3, 6);
+  if (opp.downs >= CONFIG.knockdown.maxDowns) {
+    endByKO(fighterOpponent(opp), opp, 'TKO');
+    return;
+  }
   onKnockdown(opp);
 }
 
@@ -1170,12 +1439,14 @@ function doKO(opp, dir, m) {
   onKO(opp);
 }
 
-/* ---- ganci per juice/audio (riempiti in M5) e match (M4) ---- */
+/* ---- ganci per juice/audio (riempiti in M5) ---- */
 function onHit(f, opp, m, blocked) {}
 function onGuardBreak(opp) {}
-function onKnockdown(opp) {}
-function onKO(opp) {}
+function onKnockdown(opp) { announce('AL TAPPETO!', 1200); }
+function onKO(opp) { endByKO(fighterOpponent(opp), opp, 'KO'); }
 function onWhoosh(f) {}
+function onBell() {}
+function onKOJuice(loser) {}
 
 /* ============================ GAME LOOP ============================ */
 var lastT = 0;
@@ -1198,7 +1469,13 @@ function frame(tNow) {
     if (hitstopMs > 0) {
       hitstopMs -= dt * 1000;
     } else {
-      handlePlayerInput(f1);
+      if (Match.phase === 'fight') {
+        handlePlayerInput(f1);
+        updateCPU(f2, gdt);
+      } else {
+        f2.cpuDir = 0;
+      }
+      updateMatch(gdt);
       updateFighter(f1, gdt, tNow);
       updateFighter(f2, gdt, tNow);
       separateBodies();
