@@ -43,7 +43,8 @@ var CONFIG = {
     pelvisH: 88,
     chestH: 138,
     headH: 172,
-    headR: 23,
+    headR: 23,            // raggio "logico": collo/proporzioni, NON la hitbox da combattimento
+    headVisualScale: 1.18, // teste da bobblehead: si devono riconoscere gli amici
     armLen: 72,
     legLen: 92,
     limbThick: 15,
@@ -763,7 +764,12 @@ function separateBodies() {
 // molle morbide e poco smorzamento, così ondeggia e frusta.
 // Al KO (o a terra) le molle si spengono: ragdoll pieno.
 var BODY_POINTS = ['head', 'chest', 'pelvis', 'handLead', 'handRear', 'footLead', 'footRear'];
-var BODY_RADII = { head: 23, chest: 14, pelvis: 14, handLead: 10, handRear: 10, footLead: 9, footRear: 9 };
+// raggio di COLLISIONE del ragdoll (segue il raggio visivo, così la testa grossa
+// appoggia giusta sul tappeto). La hitbox da combattimento è a parte: CONFIG.hurtbox.
+var BODY_RADII = {
+  head: CONFIG.fighter.headR * CONFIG.fighter.headVisualScale,
+  chest: 14, pelvis: 14, handLead: 10, handRear: 10, footLead: 9, footRear: 9
+};
 
 function makeBody(f, t) {
   var pose = computePose(f, t);
@@ -1106,21 +1112,22 @@ function drawFighter(f, t) {
   ctx.lineTo(lerp(p.pelvis.x, p.chest.x, 0.28), lerp(p.pelvis.y, p.chest.y, 0.28));
   ctx.stroke();
 
-  // testa con la faccia
+  // testa con la faccia (raggio visivo maggiorato: bobblehead)
+  var hr = F.headR * F.headVisualScale;
   var hx = p.head.x, hy = p.head.y;
   var ang = Math.atan2(hy - p.chest.y, hx - p.chest.x) + Math.PI / 2;
   ctx.save();
   ctx.translate(hx, hy);
   ctx.rotate(ang * 0.5 + (f.headSpin || 0));
   ctx.beginPath();
-  ctx.arc(0, 0, F.headR, 0, 7);
+  ctx.arc(0, 0, hr, 0, 7);
   ctx.save();
   ctx.clip();
-  drawFaceCover(ctx, f.face.img, F.headR);
+  drawFaceCover(ctx, f.face.img, hr * 1.02); // tucca la foto sotto l'anello, niente sliver
   ctx.restore();
-  ctx.strokeStyle = col.body;
-  ctx.lineWidth = 4;
-  ctx.beginPath(); ctx.arc(0, 0, F.headR, 0, 7); ctx.stroke();
+  ctx.strokeStyle = col.body;   // l'anello colorato incornicia e stacca dallo sfondo
+  ctx.lineWidth = 4.5;
+  ctx.beginPath(); ctx.arc(0, 0, hr, 0, 7); ctx.stroke();
   ctx.restore();
 
   // braccio lead (davanti)
