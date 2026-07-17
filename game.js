@@ -249,6 +249,196 @@ function userTap() {
   for (var i = 0; i < _tapHooks.length; i++) _tapHooks[i]();
 }
 
+/* ============================ AUDIO (tutto sintetizzato) ============================ */
+var AudioSys = { ctx: null, master: null, muted: false, crowdGain: null };
+var CrowdE = 0; // eccitazione del pubblico 0..1.5
+
+function initAudio() {
+  if (AudioSys.ctx) return;
+  var AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  var ac = new AC();
+  AudioSys.ctx = ac;
+  var master = ac.createGain();
+  master.gain.value = AudioSys.muted ? 0 : CONFIG.audio.master;
+  master.connect(ac.destination);
+  AudioSys.master = master;
+
+  // boato del pubblico: rumore in loop filtrato, il gain sale coi colpi
+  var len = ac.sampleRate * 2;
+  var buf = ac.createBuffer(1, len, ac.sampleRate);
+  var data = buf.getChannelData(0);
+  for (var i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+  var src = ac.createBufferSource();
+  src.buffer = buf; src.loop = true;
+  var filt = ac.createBiquadFilter();
+  filt.type = 'bandpass'; filt.frequency.value = 380; filt.Q.value = 0.5;
+  var g = ac.createGain();
+  g.gain.value = 0.03;
+  src.connect(filt); filt.connect(g); g.connect(master);
+  src.start();
+  AudioSys.crowdGain = g;
+}
+_tapHooks.push(function () {
+  initAudio();
+  if (AudioSys.ctx && AudioSys.ctx.state === 'suspended') AudioSys.ctx.resume();
+});
+
+function toggleMute() {
+  AudioSys.muted = !AudioSys.muted;
+  if (AudioSys.master) {
+    AudioSys.master.gain.value = AudioSys.muted ? 0 : CONFIG.audio.master;
+  }
+  document.getElementById('btn-mute').textContent = AudioSys.muted ? '🔇' : '🔊';
+}
+
+function noiseBurst(dur, filterType, freq, vol) {
+  var ac = AudioSys.ctx;
+  if (!ac) return;
+  var len = Math.max(1, Math.floor(ac.sampleRate * dur));
+  var buf = ac.createBuffer(1, len, ac.sampleRate);
+  var d = buf.getChannelData(0);
+  for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  var src = ac.createBufferSource();
+  src.buffer = buf;
+  var filt = ac.createBiquadFilter();
+  filt.type = filterType; filt.frequency.value = freq;
+  var g = ac.createGain();
+  var t = ac.currentTime;
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  src.connect(filt); filt.connect(g); g.connect(AudioSys.master);
+  src.start(); src.stop(t + dur);
+}
+
+// tonfo: sine bassa che scende + botto di rumore
+function sfxThud(vol, freq) {
+  var ac = AudioSys.ctx;
+  if (!ac) return;
+  var t = ac.currentTime;
+  var osc = ac.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(freq, t);
+  osc.frequency.exponentialRampToValueAtTime(Math.max(30, freq * 0.4), t + 0.12);
+  var g = ac.createGain();
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+  osc.connect(g); g.connect(AudioSys.master);
+  osc.start(t); osc.stop(t + 0.2);
+  noiseBurst(0.08, 'lowpass', 420, vol * 0.8);
+}
+
+// whoosh: rumore in bandpass che sale
+function sfxWhoosh() {
+  var ac = AudioSys.ctx;
+  if (!ac) return;
+  var t = ac.currentTime;
+  var len = Math.floor(ac.sampleRate * 0.18);
+  var buf = ac.createBuffer(1, len, ac.sampleRate);
+  var d = buf.getChannelData(0);
+  for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  var src = ac.createBufferSource();
+  src.buffer = buf;
+  var filt = ac.createBiquadFilter();
+  filt.type = 'bandpass'; filt.Q.value = 1.2;
+  filt.frequency.setValueAtTime(400, t);
+  filt.frequency.exponentialRampToValueAtTime(1600, t + 0.15);
+  var g = ac.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.22, t + 0.06);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+  src.connect(filt); filt.connect(g); g.connect(AudioSys.master);
+  src.start(); src.stop(t + 0.2);
+}
+
+// campana di inizio/fine round
+function sfxBell() {
+  var ac = AudioSys.ctx;
+  if (!ac) return;
+  var t = ac.currentTime;
+  var freqs = [1100, 1650, 2210];
+  for (var i = 0; i < freqs.length; i++) {
+    var osc = ac.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = freqs[i];
+    var g = ac.createGain();
+    g.gain.setValueAtTime(0.22 / (i + 1), t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 1.4);
+    osc.connect(g); g.connect(AudioSys.master);
+    osc.start(t); osc.stop(t + 1.5);
+  }
+}
+
+function updateCrowd(dt) {
+  CrowdE = Math.max(0, CrowdE - dt * 0.35);
+  if (AudioSys.crowdGain) {
+    var target = 0.03 + CrowdE * 0.22;
+    var g = AudioSys.crowdGain.gain;
+    g.value = lerp(g.value, target, Math.min(1, dt * 5));
+  }
+}
+
+/* ============================ PARTICELLE ============================ */
+var particles = [];
+var MAX_PARTICLES = 160;
+
+function spawnP(p) { if (particles.length < MAX_PARTICLES) particles.push(p); }
+
+function sparks(x, y, dir, n, color) {
+  for (var i = 0; i < n; i++) {
+    spawnP({ x: x, y: y, vx: dir * rand(80, 420) + rand(-80, 80), vy: rand(-280, -40),
+             g: 1100, life: rand(0.22, 0.45), t: 0, r: rand(2, 4), color: color, kind: 'spark' });
+  }
+}
+
+function sweat(x, y, dir, n) {
+  for (var i = 0; i < n; i++) {
+    spawnP({ x: x + rand(-8, 8), y: y + rand(-8, 8), vx: dir * rand(60, 260) + rand(-100, 100),
+             vy: rand(-320, -120), g: 1500, life: rand(0.3, 0.55), t: 0, r: rand(2, 3.4),
+             color: 'rgba(170,210,255,0.9)', kind: 'sweat' });
+  }
+}
+
+function dust(x, n) {
+  for (var i = 0; i < n; i++) {
+    spawnP({ x: x + rand(-24, 24), y: rand(-6, 0), vx: rand(-70, 70), vy: rand(-90, -20),
+             g: -40, life: rand(0.5, 0.9), t: 0, r: rand(6, 13),
+             color: 'rgba(200,188,158,', kind: 'dust' });
+  }
+}
+
+function updateParticles(dt) {
+  for (var i = particles.length - 1; i >= 0; i--) {
+    var p = particles[i];
+    p.t += dt;
+    if (p.t >= p.life) { particles.splice(i, 1); continue; }
+    p.vy += p.g * dt;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    if (p.kind !== 'dust' && p.y > -1) { p.y = -1; p.vy *= -0.4; p.vx *= 0.6; }
+  }
+}
+
+function drawParticles() {
+  for (var i = 0; i < particles.length; i++) {
+    var p = particles[i];
+    var k = 1 - p.t / p.life;
+    if (p.kind === 'dust') {
+      ctx.fillStyle = p.color + (0.30 * k) + ')';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r * (1.6 - k * 0.6), 0, 7);
+      ctx.fill();
+    } else {
+      ctx.globalAlpha = k;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r * k + 0.5, 0, 7);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+
 /* ============================ FACCE ============================ */
 // Testa = cerchio con dentro la foto (o un placeholder disegnato).
 function makePlaceholderFace(skin, hair, mustache) {
@@ -679,6 +869,7 @@ function collidePoint(pt, r, P) {
     pt.y = -r;
     if (vy > 0) pt.py = pt.y + vy * P.bounce;
     pt.px = pt.x - vx * P.groundFriction;
+    if (vy > 9) dust(pt.x, Math.min(4, Math.floor(vy * 0.35)));  // polvere sull'impatto
   }
   // rete della gabbia
   var wall = CONFIG.world.cageHalf - 10;
@@ -1119,6 +1310,10 @@ function startRound(n) {
     f.body = makeBody(f, 0);
   }
   if (f2.cpu) { f2.cpu.blockT = 0; f2.cpu.pendingBlock = -1; f2.cpu.pendingDodge = -1; f2.cpu.getupT = -1; }
+  timescale = 1;
+  slowmoT = 0;
+  hitstopMs = 0;
+  particles.length = 0;
   announce('ROUND ' + n, R.introMs - 200);
 }
 
@@ -1439,19 +1634,66 @@ function doKO(opp, dir, m) {
   onKO(opp);
 }
 
-/* ---- ganci per juice/audio (riempiti in M5) ---- */
-function onHit(f, opp, m, blocked) {}
-function onGuardBreak(opp) {}
-function onKnockdown(opp) { announce('AL TAPPETO!', 1200); }
+/* ---- juice: qui il gioco "si sente" ---- */
+function onHit(f, opp, m, blocked) {
+  var dir = opp.x >= f.x ? 1 : -1;
+  var hx = (f.x + opp.x) / 2 + dir * 12;
+  var hy = m.hitY;
+  if (blocked) {
+    hitstopMs = Math.max(hitstopMs, 30);
+    cam.shake += m.damage * CONFIG.juice.shakePerDamage * 0.35;
+    sparks(hx, hy, dir, 4, '#9fc4ff');
+    CrowdE = Math.min(1.5, CrowdE + 0.05);
+    sfxThud(0.3, 240);
+  } else {
+    hitstopMs = Math.max(hitstopMs,
+      m.kind === 'punch' ? CONFIG.juice.hitstopPunchMs : CONFIG.juice.hitstopKickMs);
+    cam.shake += m.damage * CONFIG.juice.shakePerDamage;
+    sparks(hx, hy, dir, m.kind === 'punch' ? 6 : 10, '#ffd24a');
+    if (opp.body) sweat(opp.body.head.x, opp.body.head.y, dir, m.kind === 'punch' ? 3 : 6);
+    CrowdE = Math.min(1.5, CrowdE + m.damage * 0.035);
+    sfxThud(clamp(0.35 + m.damage * 0.035, 0, 0.95), m.kind === 'punch' ? 150 : 105);
+  }
+}
+
+function onGuardBreak(opp) {
+  announce('GUARDIA ROTTA!', 1100);
+  hitstopMs = Math.max(hitstopMs, 50);
+  cam.shake += 8;
+  sparks(opp.x, -130, -opp.facing, 8, '#9fc4ff');
+  sfxThud(0.6, 330);
+  noiseBurst(0.15, 'highpass', 1500, 0.25);
+}
+
+function onKnockdown(opp) {
+  announce('AL TAPPETO!', 1200);
+  cam.shake += 12;
+  CrowdE = Math.min(1.5, CrowdE + 0.7);
+  dust(opp.x, 8);
+  sfxThud(0.8, 95);
+}
+
 function onKO(opp) { endByKO(fighterOpponent(opp), opp, 'KO'); }
-function onWhoosh(f) {}
-function onBell() {}
-function onKOJuice(loser) {}
+
+function onWhoosh(f) { sfxWhoosh(); }
+
+function onBell() { sfxBell(); }
+
+function onKOJuice(loser) {
+  timescale = CONFIG.juice.koSlowmo;
+  slowmoT = CONFIG.juice.koSlowmoMs;
+  cam.shake += 20;
+  CrowdE = 1.5;
+  dust(loser.x, 10);
+  sfxThud(1.0, 80);
+  noiseBurst(1.2, 'bandpass', 500, 0.3); // il pubblico esplode
+}
 
 /* ============================ GAME LOOP ============================ */
 var lastT = 0;
 var timescale = 1;
 var hitstopMs = 0;
+var slowmoT = 0;
 
 function frame(tNow) {
   requestAnimationFrame(frame);
@@ -1465,6 +1707,10 @@ function frame(tNow) {
   drawBackground(tNow);
 
   if (Match.running) {
+    if (slowmoT > 0) {
+      slowmoT -= dt * 1000;
+      if (slowmoT <= 0) timescale = 1;
+    }
     var gdt = dt * timescale;
     if (hitstopMs > 0) {
       hitstopMs -= dt * 1000;
@@ -1481,8 +1727,10 @@ function frame(tNow) {
       separateBodies();
       updateBody(f1, gdt, tNow);
       updateBody(f2, gdt, tNow);
+      updateParticles(gdt);
     }
     updateCamera(dt);
+    updateCrowd(dt);
 
     ctx.save();
     applyCameraTransform();
@@ -1492,6 +1740,7 @@ function frame(tNow) {
     drawMat();
     drawFighter(f1, tNow);
     drawFighter(f2, tNow);
+    drawParticles();
     drawFence(true);
     ctx.restore();
 
@@ -1507,8 +1756,13 @@ function frame(tNow) {
   var btns = document.querySelectorAll('#menu-overlay .menu-btn');
   for (var i = 0; i < btns.length; i++) {
     btns[i].addEventListener('click', function (e) {
+      userTap(); // sblocca l'audio (iOS vuole un gesto utente)
       startMatch(parseInt(e.currentTarget.getAttribute('data-diff'), 10));
     });
   }
+  document.getElementById('btn-mute').addEventListener('click', function () {
+    userTap();
+    toggleMute();
+  });
   requestAnimationFrame(function (t) { lastT = t; requestAnimationFrame(frame); });
 })();
