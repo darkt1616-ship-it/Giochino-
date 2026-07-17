@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Botte nella Gabbia</title>
+<style>
+  * {
+    margin: 0; padding: 0; box-sizing: border-box;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #0b0b12;
+    touch-action: none;
+    overscroll-behavior: none;
+    position: fixed;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  #game {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    display: block;
+    touch-action: none;
+  }
+
+  /* ---- touch controls ---- */
+  .ctrl {
+    position: absolute;
+    border: none;
+    border-radius: 50%;
+    color: #fff;
+    background: rgba(255,255,255,0.10);
+    box-shadow: inset 0 0 0 2px rgba(255,255,255,0.25);
+    font-weight: 800;
+    touch-action: none;
+    z-index: 10;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .ctrl:active, .ctrl.pressed {
+    background: rgba(255,255,255,0.28);
+  }
+  #btn-left  { left: 4vw;  bottom: 6vh; width: 76px; height: 76px; font-size: 28px; }
+  #btn-right { left: calc(4vw + 88px); bottom: 6vh; width: 76px; height: 76px; font-size: 28px; }
+  #btn-punch { right: calc(4vw + 88px); bottom: 6vh;  width: 72px; height: 72px; font-size: 13px; background: rgba(255,90,90,0.22); }
+  #btn-kick  { right: 4vw; bottom: calc(6vh + 52px); width: 72px; height: 72px; font-size: 13px; background: rgba(255,170,60,0.22); }
+  #btn-block { right: calc(4vw + 60px); bottom: calc(6vh + 108px); width: 64px; height: 64px; font-size: 13px; background: rgba(90,160,255,0.22); }
+  #btn-mute {
+    top: max(8px, env(safe-area-inset-top)); right: 10px;
+    width: 44px; height: 44px; font-size: 20px;
+    border-radius: 12px;
+    background: rgba(255,255,255,0.08);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.18);
+  }
+
+  /* ---- overlays ---- */
+  .overlay {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 18px;
+    background: rgba(8,8,14,0.92);
+    color: #fff;
+    z-index: 50;
+    text-align: center;
+    padding: 20px;
+  }
+  .overlay.hidden { display: none; }
+  .overlay h1 {
+    font-size: clamp(26px, 6vw, 48px);
+    font-style: italic;
+    letter-spacing: 2px;
+    text-shadow: 0 4px 0 rgba(0,0,0,0.6), 0 0 30px rgba(255,80,80,0.35);
+  }
+  .overlay p { opacity: 0.75; max-width: 480px; line-height: 1.4; }
+  .menu-btn {
+    border: none;
+    border-radius: 14px;
+    padding: 14px 34px;
+    min-width: 220px;
+    font-size: 18px; font-weight: 800;
+    color: #fff;
+    background: linear-gradient(180deg, #d33, #911);
+    box-shadow: 0 4px 0 #500, 0 8px 18px rgba(0,0,0,0.5);
+    touch-action: manipulation;
+  }
+  .menu-btn:active { transform: translateY(3px); box-shadow: 0 1px 0 #500; }
+  .menu-btn.alt { background: linear-gradient(180deg, #444, #222); box-shadow: 0 4px 0 #000, 0 8px 18px rgba(0,0,0,0.5); }
+
+  #rotate-overlay { z-index: 100; }
+  #rotate-overlay .phone {
+    font-size: 64px;
+    animation: spinphone 1.6s ease-in-out infinite;
+  }
+  @keyframes spinphone {
+    0%, 20% { transform: rotate(0deg); }
+    60%, 100% { transform: rotate(90deg); }
+  }
+</style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <button class="ctrl" id="btn-left">◀</button>
+  <button class="ctrl" id="btn-right">▶</button>
+  <button class="ctrl" id="btn-punch">PUGNO</button>
+  <button class="ctrl" id="btn-kick">CALCIO</button>
+  <button class="ctrl" id="btn-block">PARA</button>
+  <button class="ctrl" id="btn-mute">🔊</button>
+
+  <div class="overlay hidden" id="rotate-overlay">
+    <div class="phone">📱</div>
+    <h1>GIRA IL TELEFONO</h1>
+    <p>Questo incontro si guarda in orizzontale.</p>
+  </div>
+
+  <div class="overlay" id="menu-overlay">
+    <h1>BOTTE NELLA GABBIA</h1>
+    <p id="menu-sub">Scegli quanto deve essere cattiva la CPU.</p>
+    <button class="menu-btn" data-diff="0">MOLLACCIONE</button>
+    <button class="menu-btn" data-diff="1">TOSTO</button>
+    <button class="menu-btn" data-diff="2">MACELLAIO</button>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>
