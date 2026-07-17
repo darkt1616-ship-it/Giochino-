@@ -102,13 +102,16 @@ var CONFIG = {
 
   physics: {
     gravity: 2400,
-    iterations: 3,
-    poseSpring: 26,        // rigidità molle verso le pose (arti)
-    poseDamp: 0.82,        // smorzamento (basso = sfarfalla, comico)
-    coreSpring: 60,        // il core (torso/bacino) segue lo stato arcade
-    groundFriction: 0.72,
-    bounce: 0.35,
-    fenceBounce: 0.55
+    iterations: 3,         // constraint solve per frame (alza se sfarfalla)
+    poseSpring: 260,       // molle verso le pose (arti): morbide, sforano
+    poseDamp: 0.90,        // smorzamento basso = ondeggia, comico
+    coreSpring: 1600,      // torso/bacino inchiodati allo stato arcade
+    coreDamp: 0.72,
+    limbGravity: 0.35,     // frazione di gravità sugli arti (cascano un po')
+    groundFriction: 0.68,  // attrito al suolo in ragdoll
+    bounce: 0.35,          // rimbalzo sul tappeto
+    fenceBounce: 0.55,     // rimbalzo sulla rete
+    impulseScale: 0.9      // quanto il knockback frusta il corpo molle
   },
 
   camera: {
@@ -555,6 +558,137 @@ function separateBodies() {
   }
 }
 
+/* ============================ CORPO MOLLE (Verlet) ============================ */
+// 7 punti: testa, torace, bacino, 2 mani, 2 piedi.
+// Torace/bacino inseguono lo stato arcade con molle rigide; il resto con
+// molle morbide e poco smorzamento, così ondeggia e frusta.
+// Al KO (o a terra) le molle si spengono: ragdoll pieno.
+var BODY_POINTS = ['head', 'chest', 'pelvis', 'handLead', 'handRear', 'footLead', 'footRear'];
+var BODY_RADII = { head: 23, chest: 14, pelvis: 14, handLead: 10, handRear: 10, footLead: 9, footRear: 9 };
+
+function makeBody(f, t) {
+  var pose = computePose(f, t);
+  var body = {};
+  for (var i = 0; i < BODY_POINTS.length; i++) {
+    var n = BODY_POINTS[i];
+    body[n] = { x: pose[n].x, y: pose[n].y, px: pose[n].x, py: pose[n].y };
+  }
+  // constraint di distanza: [a, b, lunghezza, "rope" = limita solo lo stiramento]
+  var F = CONFIG.fighter;
+  body.constraints = [
+    ['pelvis', 'chest', F.chestH - F.pelvisH, false],
+    ['chest', 'head', F.headH - F.chestH + 6, false],
+    ['chest', 'handLead', F.armLen, true],
+    ['chest', 'handRear', F.armLen, true],
+    ['pelvis', 'footLead', F.legLen, true],
+    ['pelvis', 'footRear', F.legLen, true],
+    ['head', 'pelvis', F.headH - F.pelvisH, true]  // il collo non si piega all'indietro all'infinito
+  ];
+  return body;
+}
+
+function isRagdoll(f) { return f.state === 'ko' || f.state === 'downed'; }
+
+function bodyImpulse(f, ix, iy) {
+  // un impulso sul core: gli arti seguono in ritardo e frustano
+  if (!f.body) return;
+  var k = CONFIG.physics.impulseScale * 0.016;
+  f.body.chest.px -= ix * k;
+  f.body.chest.py -= iy * k;
+  f.body.pelvis.px -= ix * k * 0.7;
+  f.body.pelvis.py -= iy * k * 0.7;
+  f.body.head.px -= ix * k * 1.3;
+  f.body.head.py -= iy * k * 1.3;
+}
+
+function updateBody(f, dt, t) {
+  if (!f.body || dt <= 0) return;
+  var B = f.body;
+  var P = CONFIG.physics;
+  var ragdoll = isRagdoll(f);
+  var pose = ragdoll ? null : computePose(f, t);
+  var dampPow = dt * 60;
+
+  for (var i = 0; i < BODY_POINTS.length; i++) {
+    var n = BODY_POINTS[i];
+    var pt = B[n];
+    var isCore = (n === 'chest' || n === 'pelvis');
+    var ax = 0, ay = 0;
+
+    if (ragdoll) {
+      ay = P.gravity;
+    } else {
+      var k = isCore ? P.coreSpring : P.poseSpring;
+      ax = (pose[n].x - pt.x) * k;
+      ay = (pose[n].y - pt.y) * k + (isCore ? 0 : P.gravity * P.limbGravity);
+    }
+
+    var damp = ragdoll ? 0.995 : Math.pow(isCore ? P.coreDamp : P.poseDamp, dampPow);
+    var vx = (pt.x - pt.px) * damp;
+    var vy = (pt.y - pt.py) * damp;
+    pt.px = pt.x; pt.py = pt.y;
+    pt.x += vx + ax * dt * dt;
+    pt.y += vy + ay * dt * dt;
+  }
+
+  // solve constraints + collisioni
+  for (var it = 0; it < P.iterations; it++) {
+    for (var c = 0; c < B.constraints.length; c++) {
+      var con = B.constraints[c];
+      var a = B[con[0]], b = B[con[1]];
+      var len = con[2], rope = con[3];
+      var dx = b.x - a.x, dy = b.y - a.y;
+      var d = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+      if (rope && d <= len) continue;
+      var diff = (d - len) / d * 0.5;
+      a.x += dx * diff; a.y += dy * diff;
+      b.x -= dx * diff; b.y -= dy * diff;
+    }
+    for (var j = 0; j < BODY_POINTS.length; j++) {
+      collidePoint(B[BODY_POINTS[j]], BODY_RADII[BODY_POINTS[j]], P);
+    }
+  }
+
+  // testa che gira al KO (la foto che rotola è tutto il senso del gioco)
+  if (ragdoll) {
+    f.headSpin = (f.headSpin || 0) + (f.headSpinV || 0) * dt;
+    f.headSpinV = (f.headSpinV || 0) * Math.max(0, 1 - 1.5 * dt);
+    // lo stato arcade segue il corpo, così camera e rialzata tornano giuste
+    f.x = clamp(B.pelvis.x, -CONFIG.world.cageHalf + 20, CONFIG.world.cageHalf - 20);
+  } else {
+    f.headSpin = (f.headSpin || 0) * Math.max(0, 1 - 8 * dt);
+    f.headSpinV = 0;
+  }
+
+  f.renderPose = {
+    head: B.head, chest: B.chest, pelvis: B.pelvis,
+    handLead: B.handLead, handRear: B.handRear,
+    footLead: B.footLead, footRear: B.footRear
+  };
+}
+
+function collidePoint(pt, r, P) {
+  // tappeto
+  if (pt.y > -r) {
+    var vy = pt.y - pt.py;
+    var vx = pt.x - pt.px;
+    pt.y = -r;
+    if (vy > 0) pt.py = pt.y + vy * P.bounce;
+    pt.px = pt.x - vx * P.groundFriction;
+  }
+  // rete della gabbia
+  var wall = CONFIG.world.cageHalf - 10;
+  if (pt.x > wall) {
+    var vx2 = pt.x - pt.px;
+    pt.x = wall;
+    if (vx2 > 0) pt.px = pt.x + vx2 * P.fenceBounce;
+  } else if (pt.x < -wall) {
+    var vx3 = pt.x - pt.px;
+    pt.x = -wall;
+    if (vx3 < 0) pt.px = pt.x + vx3 * P.fenceBounce;
+  }
+}
+
 /* ============================ CAMERA ============================ */
 var cam = { x: 0, scale: 1, shake: 0, shakeX: 0, shakeY: 0 };
 
@@ -767,10 +901,10 @@ function drawFighter(f, t) {
 
   // testa con la faccia
   var hx = p.head.x, hy = p.head.y;
-  var ang = Math.atan2(hy - p.chest.y, hx - p.chest.x) + Math.PI / 2 + (f.headSpin || 0);
+  var ang = Math.atan2(hy - p.chest.y, hx - p.chest.x) + Math.PI / 2;
   ctx.save();
   ctx.translate(hx, hy);
-  ctx.rotate(ang * 0.5);
+  ctx.rotate(ang * 0.5 + (f.headSpin || 0));
   ctx.beginPath();
   ctx.arc(0, 0, F.headR, 0, 7);
   ctx.save();
@@ -892,6 +1026,8 @@ function startMatch(diff) {
   f1 = makeFighter(0, -140, 1);
   f2 = makeFighter(1, 140, -1);
   f1.isPlayer = true;
+  f1.body = makeBody(f1, 0);
+  f2.body = makeBody(f2, 0);
   document.getElementById('menu-overlay').classList.add('hidden');
 }
 
@@ -976,6 +1112,7 @@ function resolveHit(f, opp, m) {
     opp.hp -= chip;
     opp.stamina -= CONFIG.block.staminaDrainHit;
     opp.vx += dir * m.knockback * 0.45;
+    bodyImpulse(opp, dir * m.knockback * 1.2, 0);
     f.damageDealt += chip;
     if (opp.stamina <= 0) {
       opp.stamina = 0;
@@ -990,6 +1127,7 @@ function resolveHit(f, opp, m) {
   opp.hp -= m.damage;
   f.damageDealt += m.damage;
   opp.vx += dir * m.knockback;
+  bodyImpulse(opp, dir * m.knockback * 3.2, -m.knockback * 0.9);
   onHit(f, opp, m, false);
 
   if (opp.hp <= 0) {
@@ -1015,7 +1153,9 @@ function doKnockdown(opp, dir) {
   opp.stateT = 0;
   opp.dodgeDir = dir;   // riusato come "verso della caduta"
   opp.downs++;
-  opp.vx += dir * 180;
+  opp.vx = 0;
+  bodyImpulse(opp, dir * 850, -650);
+  opp.headSpinV = dir * rand(3, 6);
   onKnockdown(opp);
 }
 
@@ -1024,7 +1164,9 @@ function doKO(opp, dir, m) {
   opp.stateT = 0;
   opp.ko = true;
   opp.dodgeDir = dir;
-  opp.vx += dir * 240;
+  opp.vx = 0;
+  bodyImpulse(opp, dir * 1200, -900);
+  opp.headSpinV = dir * rand(5, 10);
   onKO(opp);
 }
 
@@ -1060,6 +1202,8 @@ function frame(tNow) {
       updateFighter(f1, gdt, tNow);
       updateFighter(f2, gdt, tNow);
       separateBodies();
+      updateBody(f1, gdt, tNow);
+      updateBody(f2, gdt, tNow);
     }
     updateCamera(dt);
 
